@@ -144,7 +144,15 @@ def all_tracks():
 
 
 def search(text, limit=40):
-    toks = db.norm(text).split()
+    raw = (text or "").strip()
+    # Explicit tag/genre lookup: tag:rock or genre:electronic
+    if raw.lower().startswith(("tag:", "genre:")):
+        tag = raw.split(":", 1)[1].strip()
+        if not tag:
+            return []
+        rows = db.q("SELECT * FROM tracks WHERE lower(genre) LIKE ? ORDER BY title COLLATE NOCASE LIMIT ?", (f"%{tag.lower()}%", limit))
+        return [row_track(r) for r in rows]
+    toks = db.norm(raw).split()
     if not toks:
         return []
     where = " AND ".join(["search LIKE ?"] * len(toks))

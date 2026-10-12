@@ -18,6 +18,7 @@ from . import db, downloader, library, providers, recs
 UI = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "ui"
 ROUTES = []
 PORT = 0
+_EDITORIAL_CACHE = {"until": 0, "value": None}
 
 
 class ApiError(Exception):
@@ -44,8 +45,10 @@ def caps(h, m, q, b):
             return True
         except Exception:
             return False
+    settings = db.get_settings()
     return {"ffmpeg": downloader.have_ffmpeg(), "mutagen": has("mutagen"), "yt_dlp": has("yt_dlp"),
-            "ytmusicapi": has("ytmusicapi"), "spotify": bool(db.get_settings()["spotify_id"])}
+            "ytmusicapi": has("ytmusicapi"), "spotify": bool(settings.get("spotify_id")),
+            "audius": True, "jamendo": bool(settings.get("jamendo_client_id"))}
 
 
 @route("GET", r"/api/home")
@@ -58,22 +61,129 @@ def recommendations(h, m, q, b):
     return recs.mixes()
 
 
+@route("GET", r"/api/discover")
+def discover(h, m, q, b):
+    tab = q.get("tab", "hot")
+    if tab in ("recommended", "for-you"):
+        return recs.personalized()
+    if tab == "continue":
+        rows = db.q("SELECT track, MAX(ts) ts FROM history GROUP BY key ORDER BY ts DESC LIMIT 30")
+        return {"tracks": [json.loads(r["track"]) for r in rows], "errors": [], "providers": ["history"]}
+    return providers.discovery_tracks(tab=tab, genre=q.get("genre", "Pop"), country=q.get("country", "BD"), limit=40)
+
+
+@route("GET", r"/api/editorial")
+def editorial(h, m, q, b):
+    # Cached, source-aware "today's hits for you" shelf. Discovery stays native to the
+    # provider of the user's most recent/liked track where the provider supports it.
+    if _EDITORIAL_CACHE["value"] is not None and _EDITORIAL_CACHE["until"] > time.time():
+        return _EDITORIAL_CACHE["value"]
+    out = {"hits": [], "hits_source": "YouTube Music", "errors": []}
+    rows = db.q("SELECT track FROM likes ORDER BY ts DESC LIMIT 5")
+    rows += db.q("SELECT track FROM history ORDER BY ts DESC LIMIT 8")
+    seeds, artists = [], []
+    for row in rows:
+        try:
+            track = json.loads(row["track"])
+            seeds.append(track)
+            artist = (track.get("artist") or "").split(",")[0].strip()
+            if artist and artist != "Unknown Artist" and artist not in artists:
+                artists.append(artist)
+        except Exception:
+            continue
+    seed = seeds[0] if seeds else {}
+    artist = artists[0] if artists else ""
+    source = seed.get("source", "yt")
+    try:
+        if source == "audius":
+            out["hits"] = providers.audius_related(seed, 18)
+            out["hits_source"] = "Audius recommendations"
+        elif source == "jamendo":
+            genre = (seed.get("genre") or "").split(",")[0].strip()
+            out["hits"] = providers.search_jamendo(genre or artist or seed.get("title", "indie"), 18, by_genre=bool(genre))
+            out["hits_source"] = "Jamendo catalog"
+        elif source == "sp":
+            out["hits"] = providers.search_sp("artist:" + artist if artist else "popular", 18)
+            out["hits_source"] = "Spotify catalog"
+        elif source == "itunes":
+            out["hits"] = providers.search_itunes(artist or "popular music", 18)
+            out["hits_source"] = "Apple music catalog"
+        else:
+            out["hits"] = providers.search_yt((artist + " hits") if artist else "popular songs", 18, "songs")
+            out["hits_source"] = "YouTube Music picks"
+    except Exception as e:
+        out["errors"].append(f"Personalized hits: {str(e)[:120]}")
+        # Keep the feature useful if a preferred source is unavailable.
+        try:
+            out["hits"] = providers.search_yt((artist + " hits") if artist else "popular songs", 18, "songs")
+            out["hits_source"] = "YouTube Music fallback"
+        except Exception as fallback:
+            out["errors"].append(f"YouTube Music: {str(fallback)[:120]}")
+    _EDITORIAL_CACHE["value"] = out
+    _EDITORIAL_CACHE["until"] = time.time() + 1800
+    return out
+
+
 @route("GET", r"/api/search")
 def search(h, m, q, b):
     text, scope = q.get("q", "").strip(), q.get("scope", "local")
+    kind = q.get("kind", "songs")
     if not text:
-        return {"local": [], "yt": [], "sp": [], "errors": []}
+        return {"local": [], "yt": [], "sp": [], "itunes": [], "musicbrainz": [], "audius": [], "jamendo": [], "collections": [], "errors": []}
     if scope == "local":
         return {"local": library.search(text, 40)}
-    out = {"yt": [], "sp": [], "errors": []}
-    with ThreadPoolExecutor(2) as ex:
-        fy, fs = ex.submit(providers.search_yt, text, 20), ex.submit(providers.search_sp, text, 10)
-        for name, fut in (("yt", fy), ("sp", fs)):
+    out = {"yt": [], "sp": [], "itunes": [], "musicbrainz": [], "audius": [], "jamendo": [], "collections": [], "errors": []}
+    if kind in ("playlists", "channels"):
+        try:
+            out["collections"] = providers.search_yt_collections(text, 25, kind)
+        except Exception as e:
+            out["errors"].append(f"YouTube Music: {str(e)[:140]}")
+        return out
+    # Parallel provider calls keep UI latency close to the slowest provider, not the sum of all.
+    jobs = {
+        "yt": lambda: providers.search_yt(text, 25, "songs"),
+        "itunes": lambda: providers.search_itunes(text, 20),
+        "sp": lambda: providers.search_sp(text, 10),
+        "audius": lambda: providers.search_audius(text, 25),
+        "jamendo": lambda: providers.search_jamendo(text, 18),
+    }
+    if kind == "all":
+        jobs["musicbrainz"] = lambda: providers.search_musicbrainz(text, 12)
+        jobs["yt_videos"] = lambda: providers.search_yt(text, 12, "videos")
+    labels = {"yt": "YouTube Music", "itunes": "iTunes", "sp": "Spotify", "audius": "Audius",
+              "jamendo": "Jamendo", "musicbrainz": "MusicBrainz", "yt_videos": "YouTube Music videos"}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {name: ex.submit(fn) for name, fn in jobs.items()}
+        for name, future in futs.items():
             try:
-                out[name] = fut.result()
+                found = future.result()
+                if name == "yt_videos":
+                    seen = {t.get("key") for t in out["yt"]}
+                    out["yt"].extend(t for t in found if t.get("key") not in seen)
+                else:
+                    out[name] = found or []
             except Exception as e:
-                out["errors"].append(f"{'YouTube Music' if name == 'yt' else 'Spotify'}: {str(e)[:140]}")
+                out["errors"].append(f"{labels.get(name, name)}: {str(e)[:140]}")
     return out
+
+@route("GET", r"/api/search-history")
+def search_history(h, m, q, b):
+    return {"queries": [dict(r) for r in db.q("SELECT query, ts FROM search_history ORDER BY ts DESC LIMIT 30")]}
+
+
+@route("POST", r"/api/search-history")
+def save_search_history(h, m, q, b):
+    query = (b.get("query") or "").strip()[:180]
+    if query:
+        k = db.norm(query)
+        db.run("INSERT OR REPLACE INTO search_history(query_key, query, ts) VALUES(?,?,?)", (k, query, time.time()))
+    return {"ok": True}
+
+
+@route("POST", r"/api/search-history/clear")
+def clear_search_history(h, m, q, b):
+    db.run("DELETE FROM search_history")
+    return {"ok": True}
 
 
 @route("GET", r"/api/library")
@@ -212,15 +322,18 @@ def radio(h, m, q, b):
 @route("GET", r"/api/resolve")
 def resolve(h, m, q, b):
     try:
-        if q.get("src") == "yt":
-            vid = q["id"]
-        else:
-            vid = providers.match(q.get("t", ""), q.get("a", ""), float(q.get("d") or 0))
-        info = providers.resolve(vid)
+        src = q.get("src", "yt")
+        tid = q.get("id", "")
+        track = {"source": src, "key": ("aud:" if src == "audius" else "jam:" if src == "jamendo" else "yt:" if src == "yt" else "" ) + tid,
+                 "video_id": tid if src == "yt" else None,
+                 "audius_id": tid if src == "audius" else None,
+                 "jamendo_id": tid if src == "jamendo" else None,
+                 "preview_url": q.get("preview", "") or None,
+                 "title": q.get("t", ""), "artist": q.get("a", ""), "duration": float(q.get("d") or 0)}
+        info = providers.resolve_source(track)
     except Exception as e:
         raise ApiError(502, f"Couldn't load this track: {str(e)[:160]}")
-    return {"stream": f"/stream/yt/{vid}", "video_id": vid, "codec": info["codec"], "abr": info["abr"],
-            "asr": info["asr"], "ext": info["ext"]}
+    return info
 
 
 @route("POST", r"/api/download")
@@ -322,7 +435,7 @@ def proxy_stream(h, vid, retry=True):
         raise ApiError(502, f"Upstream returned {e.code}")
     code = resp.status
     out = {"Accept-Ranges": "bytes", "Content-Type": resp.headers.get("Content-Type", "audio/webm"),
-           "Cache-Control": "no-cache"}
+           "Cache-Control": "private, max-age=120"}
     if resp.headers.get("Content-Length"):
         out["Content-Length"] = resp.headers["Content-Length"]
     else:
@@ -339,6 +452,57 @@ def proxy_stream(h, vid, retry=True):
 @route("GET", r"/stream/yt/([\w-]+)")
 def stream_yt(h, m, q, b):
     proxy_stream(h, m.group(1))
+
+
+def proxy_external(h, url, headers=None):
+    """Proxy provider-native audio through Aura's origin so the Web Audio analyser works without CORS gaps."""
+    out_headers = {"User-Agent": "AuraMusicPlayer/2.1", "Accept": "*/*"}
+    out_headers.update(headers or {})
+    client_range = h.headers.get("Range")
+    if client_range:
+        out_headers["Range"] = client_range
+    try:
+        req = urllib.request.Request(url, headers=out_headers)
+        resp = urllib.request.urlopen(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        code = e.code if e.code in (403, 404, 416, 429) else 502
+        detail = "Upstream rejected the stream" if code == 502 else f"Provider returned HTTP {code}"
+        raise ApiError(code, detail)
+    except Exception as e:
+        raise ApiError(502, f"Could not open provider stream: {str(e)[:120]}")
+    try:
+        code = getattr(resp, "status", 200) or 200
+        out = {
+            "Content-Type": resp.headers.get("Content-Type", "audio/mpeg"),
+            "Accept-Ranges": resp.headers.get("Accept-Ranges", "bytes"),
+            "Cache-Control": "private, max-age=60",
+        }
+        for k in ("Content-Length", "Content-Range"):
+            value = resp.headers.get(k)
+            if value and (k != "Content-Range" or client_range):
+                out[k] = value
+        if not out.get("Content-Length"):
+            # Streaming responses can be chunked/unknown-length; close after this response.
+            h.close_connection = True
+        if not client_range and code == 206:
+            code = 200
+            out.pop("Content-Range", None)
+        _send_headers(h, code, out)
+        _pipe(h, resp)
+    finally:
+        resp.close()
+
+
+@route("GET", r"/stream/audius/([\w-]+)")
+def stream_audius(h, m, q, b):
+    url, headers = providers.audius_file_url(m.group(1), "stream")
+    proxy_external(h, url, headers)
+
+
+@route("GET", r"/stream/jamendo/([\w-]+)")
+def stream_jamendo(h, m, q, b):
+    url = providers.jamendo_file_url(m.group(1), "stream")
+    proxy_external(h, url)
 
 
 @route("GET", r"/local/(\w+)")

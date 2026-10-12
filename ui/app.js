@@ -52,6 +52,7 @@ const IC = {
   refresh: '<path d="M21 12a9 9 0 0 1-15.5 6.2L3 16M3 12A9 9 0 0 1 18.5 5.8L21 8M21 3v5h-5M3 21v-5h5"/>',
   radio: '<circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19 5a10 10 0 0 1 0 14M5 19a10 10 0 0 1 0-14"/>',
   expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
+  mini: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M6 10h12M7 14h2m2 0h2m2 0h2"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
   next1: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
@@ -73,7 +74,7 @@ function toast(msg, err = false) {
 /* ============================================================ state */
 const S = {
   settings: {}, caps: {}, lib: [], likes: new Map(), playlists: [], jobs: [],
-  eq: null, view: null, viewTok: 0,
+  eq: null, view: null, viewTok: 0, shelfId: 0,
 };
 const Q = { list: [], i: -1, shuffle: false, repeat: "off", stack: [], tok: 0 };
 const REG = { lists: [], acts: [] };           // per-render registries (rows / click handlers)
@@ -129,7 +130,8 @@ function trackMenu(t, x, y, ctx = {}) {
     { label: "Add to playlist", icon: "plus", keep: true, fn: () => playlistMenu(t, x, y) },
     { label: isLiked(t) ? "Remove from liked songs" : "Add to liked songs", icon: "heart", fn: () => toggleLike(t) },
   ];
-  if (t.source !== "local") items.push({ label: "Download", icon: "download", keep: true, fn: () => downloadMenu(t, x, y) });
+  const providerAllowsDownload = (t.source === "audius" || t.source === "jamendo") ? !!t.downloadable : true;
+  if (t.source !== "local" && providerAllowsDownload) items.push({ label: (t.source === "audius" || t.source === "jamendo") ? "Download (permitted by provider)" : "Download", icon: "download", keep: true, fn: () => downloadMenu(t, x, y) });
   if (firstArtist(t.artist)) items.push({ label: "Go to artist", icon: "user", fn: () => nav("#/artist/" + encodeURIComponent(firstArtist(t.artist))) });
   if (ctx.playlistId && t.item_id) items.push("-", { label: "Remove from this playlist", icon: "trash", fn: async () => { await api(`/api/playlists/${ctx.playlistId}/remove`, { item_id: t.item_id }); render(); loadPlaylists(); } });
   openMenu(x, y, items);
@@ -150,6 +152,7 @@ const strip = t => { const c = { ...t }; delete c.item_id; return c; };
 /* ============================================================ audio engine + EQ */
 const audio = new Audio();
 audio.preload = "auto";
+let warmAudio = null; // muted preloader warms the next network stream without interrupting playback
 const AC = { ctx: null };
 
 const BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -324,6 +327,140 @@ function drawViz() {
   requestAnimationFrame(drawViz);
 }
 
+/* Compact translucent player visualizer. Reads the same analyser as the full player. */
+let miniVizRAF = 0;
+function drawMiniViz() {
+  if (!document.body.classList.contains("mini-player-mode") && !document.body.classList.contains("floating-desktop-mode")) { miniVizRAF = 0; return; }
+  const cv = $("#mini-viz");
+  if (!cv) return;
+  const g = cv.getContext("2d"), W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  const data = AC.an ? new Uint8Array(AC.an.frequencyBinCount) : null;
+  if (data) AC.an.getByteFrequencyData(data);
+  const color = /^#[0-9a-f]{6}$/i.test(S.settings.mini_color || "") ? S.settings.mini_color : "#ff5b1f";
+  const n = 84, bw = W / n;
+  for (let i = 0; i < n; i++) {
+    let v = data ? data[Math.min(data.length - 1, Math.floor(Math.pow(i / n, 1.55) * data.length))] / 255 : .08 + .04 * Math.sin(Date.now() / 270 + i * .5);
+    if (!audio.paused && !audio.ended) v = Math.max(.06, v);
+    const h = Math.max(2, v * H * .86);
+    g.globalAlpha = .2 + v * .8;
+    g.fillStyle = color;
+    const x = i * bw + .8, w = Math.max(1, bw - 1.7), r = Math.min(w / 2, 3);
+    g.beginPath();
+    // The visualizer is a slim strip attached to the top edge of the mini/floating bar.
+    const y = H - h;
+    if (g.roundRect) g.roundRect(x, y, w, h, r); else g.rect(x, y, w, h);
+    g.fill();
+  }
+  g.globalAlpha = 1;
+  miniVizRAF = requestAnimationFrame(drawMiniViz);
+}
+function updateMiniTrackNames() {
+  const previousIndex = Q.stack.length ? Q.stack[Q.stack.length - 1] : Q.i - 1;
+  const prev = previousIndex >= 0 ? Q.list[previousIndex] : null;
+  const nextTrack = Q.i >= 0 ? Q.list[Q.i + 1] : null;
+  const p = $("#mini-prev-name"), n = $("#mini-next-name");
+  if (p) { p.textContent = prev ? `‹ ${prev.title}` : "‹ Previous"; p.title = prev ? `Previous: ${prev.title} — ${prev.artist || ""}` : "Previous track"; }
+  if (n) { n.textContent = nextTrack ? `${nextTrack.title} ›` : "Next ›"; n.title = nextTrack ? `Next: ${nextTrack.title} — ${nextTrack.artist || ""}` : "Next track"; }
+}
+function toggleMiniPlayer(force, persist = true) {
+  const on = force === undefined ? !document.body.classList.contains("mini-player-mode") : !!force;
+  document.body.classList.toggle("mini-player-mode", on);
+  $("#b-mini")?.classList.toggle("on", on);
+  if (on && !miniVizRAF) drawMiniViz();
+  if (!on && !document.body.classList.contains("floating-desktop-mode") && miniVizRAF) { cancelAnimationFrame(miniVizRAF); miniVizRAF = 0; }
+  updateMiniTrackNames();
+  if (persist) {
+    S.settings.mini_player_mode = on;
+    api("/api/settings", { mini_player_mode: on }).then(v => { S.settings = { ...S.settings, ...v }; }).catch(() => {});
+  }
+}
+
+/* Native floating desktop bar. The existing audio/WebAudio context stays in this window,
+   so playback continues uninterrupted; browser mode intentionally reports the limitation. */
+async function toggleFloatingDesktop(force) {
+  const on = force === undefined ? !document.body.classList.contains("floating-desktop-mode") : !!force;
+  const bridge = window.pywebview?.api;
+  if (!bridge?.set_floating_mode) {
+    toast("Floating desktop mode requires the native Aura app. Run python main.py (not --browser).", true);
+    return;
+  }
+  const wasOn = document.body.classList.contains("floating-desktop-mode");
+  if (on === wasOn) return;
+  if (on) {
+    toggleMiniPlayer(false, false);
+    document.body.classList.add("floating-desktop-mode");
+  }
+  try {
+    const result = await bridge.set_floating_mode({ enabled: on, width: +(S.settings.floating_width || 520), height: +(S.settings.floating_height || 88) });
+    if (!result?.ok) throw new Error("The native window could not change modes.");
+    document.body.classList.toggle("floating-desktop-mode", on);
+    const b = $("#b-float");
+    if (b) {
+      b.classList.toggle("on", on);
+      b.title = on ? "Return to full Aura" : "Float player on desktop";
+      b.setAttribute("aria-label", b.title);
+      b.innerHTML = ic(on ? "expand" : "mini"); hydrate(b);
+    }
+    updateMiniTrackNames();
+    if (on && !miniVizRAF) drawMiniViz();
+    if (!on && miniVizRAF) { cancelAnimationFrame(miniVizRAF); miniVizRAF = 0; }
+  } catch (err) {
+    document.body.classList.toggle("floating-desktop-mode", wasOn);
+    toast("Couldn't change floating mode: " + (err.message || err), true);
+  }
+}
+
+// Drag the empty/background area to move the native bar. Releasing near an edge docks it there.
+let floatingDrag = null, lastFloatMoveAt = 0, floatingMoveLatest = null, floatingMoveWorker = false, floatingMoveDrain = Promise.resolve();
+function scheduleFloatingMove(x, y) {
+  floatingMoveLatest = { x, y };
+  if (floatingMoveWorker) return;
+  floatingMoveWorker = true;
+  floatingMoveDrain = (async () => {
+    try {
+      while (floatingMoveLatest) {
+        const point = floatingMoveLatest; floatingMoveLatest = null;
+        await window.pywebview.api.move_floating_window(point);
+      }
+    } catch { /* a dropped frame is harmless; pointer-up still docks the bar */ }
+    finally { floatingMoveWorker = false; }
+  })();
+}
+$("#player").addEventListener("pointerdown", async e => {
+  if (!document.body.classList.contains("floating-desktop-mode") || e.button !== 0) return;
+  if (e.target.closest("button, input, select, a, textarea")) return;
+  const bridge = window.pywebview?.api;
+  if (!bridge?.get_window_state) return;
+  try {
+    const playerEl = e.currentTarget;
+    try { playerEl.setPointerCapture(e.pointerId); } catch { }
+    const w = await bridge.get_window_state();
+    floatingDrag = { pointerId: e.pointerId, screenX: e.screenX, screenY: e.screenY, x: w.x, y: w.y };
+    lastFloatMoveAt = 0;
+    document.body.classList.add("floating-dragging");
+    e.preventDefault();
+  } catch { /* native window can still be moved using its title bar */ }
+});
+document.addEventListener("pointermove", e => {
+  if (!floatingDrag || e.pointerId !== floatingDrag.pointerId) return;
+  const x = floatingDrag.x + e.screenX - floatingDrag.screenX;
+  const y = floatingDrag.y + e.screenY - floatingDrag.screenY;
+  if (Date.now() - lastFloatMoveAt < 45) return;
+  lastFloatMoveAt = Date.now();
+  if (window.pywebview?.api?.move_floating_window) scheduleFloatingMove(x, y);
+});
+document.addEventListener("pointerup", async e => {
+  if (!floatingDrag || e.pointerId !== floatingDrag.pointerId) return;
+  const d = floatingDrag;
+  const x = d.x + e.screenX - d.screenX, y = d.y + e.screenY - d.screenY;
+  floatingDrag = null; document.body.classList.remove("floating-dragging");
+  try {
+    await floatingMoveDrain;
+    await window.pywebview?.api?.dock_floating_window({ x, y });
+  } catch { /* native title-bar dragging remains available as a fallback */ }
+});
+
 /* ============================================================ covers */
 function cover(src, cls = "", icon = "music") {
   return `<div class="cv ${cls}">${ic(icon)}${src ? `<img src="${esc(src)}" loading="lazy" referrerpolicy="no-referrer" alt="" onerror="this.remove()">` : ""}</div>`;
@@ -336,6 +473,12 @@ function mosaic(arts) {
 const clean = t => { const c = { ...t }; delete c.sq; delete c.item_id; return c; };
 
 /* ============================================================ playback */
+function resolveParams(t) {
+  const source = t.source || "yt";
+  const id = source === "yt" ? (t.video_id || "") : source === "audius" ? (t.audius_id || String(t.key || "").replace(/^aud:/, "")) :
+    source === "jamendo" ? (t.jamendo_id || String(t.key || "").replace(/^jam:/, "")) : (t.sp_id || t.video_id || "");
+  return new URLSearchParams({ src: source, id, t: t.title || "", a: t.artist || "", d: t.duration || 0 });
+}
 function playList(tracks, i = 0) {
   if (!tracks.length) return;
   Q.list = tracks.map(t => t); Q.i = i; Q.stack = [];
@@ -350,7 +493,7 @@ function queueAdd(tracks, atNext) {
   tracks = tracks.map(clean);
   if (Q.i < 0) return playList(tracks, 0);
   if (atNext) Q.list.splice(Q.i + 1, 0, ...tracks); else Q.list.push(...tracks);
-  toast(atNext ? "Playing next" : "Added to queue"); renderQueue();
+  toast(atNext ? "Playing next" : "Added to queue"); renderQueue(); preloadNext();
 }
 async function startRadio(t) {
   toast("Building radio…");
@@ -367,8 +510,12 @@ async function loadCurrent() {
   else {
     setBuffering(true);
     try {
-      const p = new URLSearchParams({ src: t.source === "yt" ? "yt" : "sp", id: t.video_id || t.sp_id || "", t: t.title, a: t.artist, d: t.duration || 0 });
-      const info = await api("/api/resolve?" + p);
+      // Reuse a URL resolved by preloadNext() rather than waiting on the resolver a second time.
+      let info = t.sq && t.sq.stream ? t.sq : null;
+      if (!info) {
+        const p = resolveParams(t);
+        info = await api("/api/resolve?" + p);
+      }
       if (my !== Q.tok) return;
       t.sq = info; url = info.stream; paintQual(t);
     } catch (e) {
@@ -386,10 +533,22 @@ async function loadCurrent() {
 }
 function preloadNext() {
   const n = Q.list[Q.i + 1];
-  if (n && n.source !== "local" && !n.sq) {
-    const p = new URLSearchParams({ src: n.source === "yt" ? "yt" : "sp", id: n.video_id || n.sp_id || "", t: n.title, a: n.artist, d: n.duration || 0 });
-    api("/api/resolve?" + p).then(i => { n.sq = i; }).catch(() => {});
-  }
+  if (!n) return;
+  const warm = url => {
+    try {
+      if (warmAudio) { warmAudio.pause(); warmAudio.removeAttribute("src"); warmAudio.load(); }
+      warmAudio = new Audio(); warmAudio.preload = "auto"; warmAudio.volume = 0;
+      warmAudio.src = url; warmAudio.load();
+    } catch { /* preload is an optimization; playback must still work without it */ }
+  };
+  if (n.source === "local") { warm(`/local/${n.local_id}`); return; }
+  if (n.sq && n.sq.stream) { warm(n.sq.stream); return; }
+  const p = resolveParams(n);
+  api("/api/resolve?" + p).then(i => {
+    n.sq = i;
+    // Best-effort warm-up. Never let a failed prefetch block the current song.
+    if (Q.list[Q.i + 1] === n) warm(i.stream);
+  }).catch(() => {});
 }
 async function extendWithRadio() {
   const last = Q.list[Q.list.length - 1];
@@ -431,13 +590,13 @@ function setNow(t) {
   $("#np-art").innerHTML = ic("music") + (t.art ? `<img src="${esc(t.art)}" referrerpolicy="no-referrer" alt="" onerror="this.remove()">` : "");
   $("#np-bg").style.backgroundImage = t.art ? `url("${t.art.replace(/"/g, "%22")}")` : "none";
   document.title = `${t.title} · ${t.artist} — Aura`;
-  paintQual(t); paintLike(); markPlaying();
+  paintQual(t); paintLike(); markPlaying(); updateMiniTrackNames();
   $("#seek").value = 0; $("#seek").style.setProperty("--p", "0%"); $("#t-cur").textContent = "0:00"; $("#t-dur").textContent = fmtTime(t.duration);
 }
 const artistLinks = a => (a || "").split(/,\s*/).map(n => `<a href="#/artist/${encodeURIComponent(n)}" style="cursor:pointer">${esc(n)}</a>`).join(", ");
 function paintQual(t) {
   const q = qualityOf(t), el = $("#p-qual");
-  el.hidden = false; el.className = "badge " + q.cls; el.textContent = (t.source === "local" ? "Local · " : "Stream · ") + q.txt;
+  el.hidden = false; el.className = "badge " + q.cls; el.textContent = (t.source === "local" ? "Local · " : t.source === "itunes" ? "Catalog match · " : "Stream · ") + q.txt;
   const n = $("#np-qual"); n.className = "badge " + q.cls; n.textContent = el.textContent;
 }
 function markPlaying() {
@@ -567,7 +726,20 @@ function closeNP() { $("#np").classList.remove("open"); vizOn = false; }
 $("#b-np").onclick = openNP; $("#p-art").onclick = openNP; $("#np-x").onclick = closeNP;
 
 /* player buttons */
+$("#b-mini").onclick = () => toggleMiniPlayer();
+$("#b-float").onclick = () => toggleFloatingDesktop();
 $("#b-play").onclick = toggle; $("#b-next").onclick = () => next(); $("#b-prev").onclick = prev;
+function skipBy(delta) {
+  if (Q.i < 0 || !isFinite(audio.duration)) return;
+  audio.currentTime = clamp(audio.currentTime + delta, 0, Math.max(0, curDur() - 0.15));
+}
+function syncSkipLabels() {
+  const n = clamp(+S.settings.skip_seconds || 10, 1, 120);
+  $("#b-skipback").textContent = `−${n}s`; $("#b-skipfwd").textContent = `+${n}s`;
+  $("#b-skipback").title = `Skip back ${n} seconds`; $("#b-skipfwd").title = `Skip forward ${n} seconds`;
+}
+$("#b-skipback").onclick = () => skipBy(-(clamp(+S.settings.skip_seconds || 10, 1, 120)));
+$("#b-skipfwd").onclick = () => skipBy(clamp(+S.settings.skip_seconds || 10, 1, 120));
 $("#b-shuf").onclick = () => { Q.shuffle = !Q.shuffle; syncModes(); };
 $("#b-rep").onclick = () => { Q.repeat = { off: "all", all: "one", one: "off" }[Q.repeat]; syncModes(); toast("Repeat: " + { off: "off", all: "all", one: "this song" }[Q.repeat]); };
 $("#p-like").onclick = () => { const t = curTrack(); if (t) toggleLike(t); };
@@ -581,14 +753,15 @@ const hero = (kind, title, sub, cv) => `<div class="hero">${cv}<div><div class="
 const actions = (tracks, extra = "") => `<div class="actions">
   <button class="btn pri" data-act="${reg(() => playList(tracks, 0))}">${ic("play")}Play</button>
   <button class="btn" data-act="${reg(() => playShuffled(tracks))}">${ic("shuffle")}Shuffle</button>
-  ${tracks.some(t => t.source !== "local") ? `<button class="btn ghost" data-act="${reg(() => download(tracks))}">${ic("download")}Download all</button>` : ""}${extra}</div>`;
+  ${tracks.some(t => t.source !== "local" && (!['audius','jamendo'].includes(t.source) || t.downloadable)) ? `<button class="btn ghost" data-act="${reg(() => download(tracks.filter(t => t.source !== "local" && (!['audius','jamendo'].includes(t.source) || t.downloadable))))}">${ic("download")}Download available</button>` : ""}${extra}</div>`;
 const emptyState = (title, text, cta = "", icon = "music", cls = "") => `<div class="empty">${cover(null, cls, icon)}<h3>${esc(title)}</h3><p>${text}</p>${cta ? `<div class="actions">${cta}</div>` : ""}</div>`;
 
 const albumHref = t => "#/album/" + encodeURIComponent((t.album || "") + "\u0001" + firstArtist(t.artist));
 
 function rowHtml(L, i) {
   const t = REG.lists[L].tracks[i], o = REG.lists[L].o, liked = isLiked(t);
-  const src = t.source === "yt" ? `<span class="badge web">YT Music</span>` : t.source === "sp" ? `<span class="badge web">Spotify</span>` : badge(t);
+  const sourceLabels = { yt: "YT Music", sp: "Spotify catalog", itunes: "Apple catalog", mb: "MusicBrainz", audius: "Audius stream", jamendo: "Jamendo stream" };
+  const src = t.source && sourceLabels[t.source] ? `<span class="badge web">${sourceLabels[t.source]}</span>` : badge(t);
   const album = t.album ? (t.source === "local" ? `<a href="${albumHref(t)}">${esc(t.album)}</a>` : esc(t.album)) : "";
   return `<div class="row ${curTrack() && curTrack().key === t.key ? "playing" : ""}" data-l="${L}" data-i="${i}" data-k="${esc(t.key)}">
     <div class="idx"><span class="n">${i + 1}</span><button class="pl" tabindex="-1">${ic("play")}</button><span class="bars"><s></s><s></s><s></s></span></div>
@@ -621,38 +794,101 @@ function mixCard(m) {
   S.mixes.push(m); const idx = S.mixes.length - 1;
   return `<div class="card" data-act="${reg(() => nav("#/mix/" + idx))}">${mosaic(m.tracks.map(t => t.art))}<b>${esc(m.title)}</b><small>${esc(m.subtitle || "")}</small><button class="fab" data-act="${reg(() => playList(m.tracks, 0))}" aria-label="Play">${ic("play")}</button></div>`;
 }
-const shelf = (title, sub, cards, link = "") => cards ? `<div class="sec-head"><h2 class="sec">${esc(title)}</h2>${link}</div>${sub ? `<div class="sec-sub">${esc(sub)}</div>` : ""}<div class="shelf">${cards}</div>` : "";
+const shelf = (title, sub, cards, link = "") => {
+  if (!cards) return "";
+  const id = `shelf-${++S.shelfId}`;
+  const move = dir => { const el = document.getElementById(id); if (el) el.scrollBy({ left: dir * Math.max(240, el.clientWidth * .82), behavior: "smooth" }); };
+  return `<div class="shelf-head"><div><h2 class="sec">${esc(title)}</h2>${sub ? `<div class="sec-sub">${esc(sub)}</div>` : ""}</div><div class="shelf-actions">${link}<button class="shelf-step" data-act="${reg(() => move(-1))}" aria-label="Scroll ${esc(title)} left">‹</button><button class="shelf-step" data-act="${reg(() => move(1))}" aria-label="Scroll ${esc(title)} right">›</button></div></div><div class="shelf" id="${id}">${cards}</div>`;
+};
 
 /* ============================================================ views */
 const VIEWS = {};
 S.mixes = [];
 
 VIEWS.home = async (arg, qs, tok) => {
-  main().innerHTML = `<h1 class="page">${skeleton(1)}</h1>${skeleton(4)}`;
-  const h = await api("/api/home"); if (tok !== S.viewTok) return;
+  const tab = qs.get("tab") || "recommended";
+  const genre = qs.get("genre") || "Pop";
+  const tabs = [["recommended", "For you"], ["hot", "Hot topics"], ["genres", "Genres"], ["releases", "New releases"], ["continue", "Continue session"]];
+  const tabBar = `<div class="discover-tabs">${tabs.map(([k, label]) => `<a class="chip ${tab === k ? "on" : ""}" href="#/home?tab=${k}${k === "genres" ? "&genre=" + encodeURIComponent(genre) : ""}">${label}</a>`).join("")}</div>`;
+  main().innerHTML = `<h1 class="page">Discover music</h1>${tabBar}<div class="note"><span class="spin"></span>Loading ${esc(tabs.find(x => x[0] === tab)?.[1] || "music")}…</div>`;
+  let h;
+  try { h = await api("/api/home"); } catch (e) { if (tok === S.viewTok) main().innerHTML = `<h1 class="page">Discover music</h1>${tabBar}<div class="note err">${esc(e.message)}</div>`; return; }
+  if (tok !== S.viewTok) return;
   S.mixes = [];
   const hr = new Date().getHours(), greet = hr < 5 ? "Still up?" : hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
-  let html = `<h1 class="page">${greet}</h1><div class="sub">${h.counts.tracks ? `${plural(h.counts.tracks, "song")} in your library` : "Search for anything — Aura checks your library first, then the web"}</div>`;
-  if (!h.counts.tracks && !h.recent.length) {
-    html += emptyState("Start with some music", "Add a folder to build your local library, or search to stream anything instantly — no ads.",
-      `<button class="btn pri" data-act="${reg(addFolderFlow)}">${ic("folder")}Add music folder</button><button class="btn" data-act="${reg(() => $("#q").focus())}">${ic("search")}Search online</button>`, "music");
+  let content = "";
+  const toTracksShelf = (title, subtitle, tracks) => tracks?.length ? shelf(title, subtitle, tracks.map((_, i) => trackCard(tracks, i)).join("")) : `<div class="note">No tracks to show yet.</div>`;
+  const renderGroups = (result, intro) => {
+    const groups = result.groups || Object.fromEntries(group(result.tracks || [], t => t.source || "unknown").entries());
+    const labels = { yt: "YouTube Music", audius: "Audius", jamendo: "Jamendo", sp: "Spotify catalog", itunes: "Apple / iTunes catalog", mb: "MusicBrainz" };
+    let out = `<p class="sub">${esc(intro || "Provider-native discovery. Availability depends on the provider and region.")}</p>`;
+    const keys = ["yt", "audius", "jamendo", "sp", "itunes", "mb", ...Object.keys(groups).filter(k => !["yt","audius","jamendo","sp","itunes","mb"].includes(k))];
+    let wrote = false;
+    for (const k of keys) {
+      const tracks = groups[k] || [];
+      if (!tracks.length) continue;
+      wrote = true;
+      const note = k === "yt" ? "YouTube Music charts/search · playable through YouTube Music" :
+        k === "audius" ? "Audius trending or native search · direct stream where available" :
+        k === "jamendo" ? "Jamendo licensed independent catalog · requires a free client ID in Settings" :
+        k === "sp" ? "Spotify catalog metadata · Spotify API does not supply unrestricted full-track audio" :
+        k === "itunes" ? "Apple chart/catalog data · full playback is resolved to a playable source" :
+        k === "mb" ? "Recording metadata only · playback is resolved separately" : "Results from this provider";
+      out += shelf(`${labels[k] || k} · ${tab === "hot" ? "hot now" : tab === "releases" ? "recent releases" : genre}`, note, tracks.map((_, i) => trackCard(tracks, i)).join(""));
+    }
+    if (!wrote) out += `<div class="note">No discovery results available right now. Try another genre or check your connection.</div>`;
+    (result.errors || []).forEach(err => { out += `<div class="note warn">${esc(err)}</div>`; });
+    return out;
+  };
+
+  if (tab === "recommended") {
+    content += `<div class="sub">${h.counts.tracks ? `${plural(h.counts.tracks, "song")} in your library` : "Your taste, recent listening, and native music-provider recommendations"}</div>`;
+    if (h.recent.length) content += toTracksShelf("Continue session", "Resume your recent listening", h.recent.slice(0, 12));
+    const boxId = "discover-recommended";
+    content += `<div id="${boxId}"><div class="note"><span class="spin"></span>Building recommendations from your listening history…</div></div>`;
+    content += `<div id="today-hits"><div class="note"><span class="spin"></span>Finding today's hits based on your taste…</div></div>`;
+    content += shelf("Genre mixes from your library", "Based on tags in your own music library", h.mixes.map(mixCard).join(""));
+    if (h.added.length) content += toTracksShelf("Recently added", "New additions to your collection", h.added);
+    if (h.unheard.length) content += toTracksShelf("Rediscover", "Local songs you haven't played yet", h.unheard);
+    main().innerHTML = `<h1 class="page">${greet}</h1>${tabBar}${content}`; watchMore();
+    api("/api/discover?tab=recommended").then(r => {
+      if (tok !== S.viewTok) return;
+      const box = $("#" + boxId); if (!box) return;
+      if (r.mixes?.length) {
+        box.innerHTML = `<h2 class="sec">Recommended for you</h2><p class="sec-sub">Recommendations use the seed track's native provider where supported.</p>` +
+          r.mixes.map(m => shelf(m.title, m.subtitle, (m.tracks || []).map((_, i) => trackCard(m.tracks, i)).join(""))).join("");
+      } else box.innerHTML = `<h2 class="sec">Recommended for you</h2><div class="note">${esc(r.reason || "Play or like a few songs to personalize recommendations.")}</div>`;
+      hydrate(box); watchMore();
+    }).catch(() => { const box = $("#" + boxId); if (box) box.innerHTML = `<div class="note">Play or like songs to build recommendations.</div>`; });
+    api("/api/editorial").then(r => {
+      if (tok !== S.viewTok) return;
+      const box = $("#today-hits"); if (!box) return;
+      const tracks = r.hits || [];
+      box.innerHTML = tracks.length ? shelf("Today's hits for your taste", `From ${r.hits_source || "your music services"}; source-native recommendations where supported`, tracks.map((_, i) => trackCard(tracks, i)).join("")) : `<h2 class="sec">Today's hits for your taste</h2><div class="note">Play or like a few songs to personalize this shelf.</div>`;
+      hydrate(box); watchMore();
+    }).catch(() => { const box = $("#today-hits"); if (box) box.innerHTML = `<div class="note">Today's picks are temporarily unavailable.</div>`; });
+    return;
   }
-  if (h.recent.length) {
-    html += `<div class="greet">${h.recent.slice(0, 6).map((t, i) => { const id = reg(() => playList(h.recent, i)); return `<div class="tile" data-act="${id}">${cover(t.art)}<b>${esc(t.title)}</b><button class="fab" data-act="${id}">${ic("play")}</button></div>`; }).join("")}</div>`;
-    html += shelf("Jump back in", "", h.recent.map((_, i) => trackCard(h.recent, i)).join(""));
+  if (tab === "continue") {
+    content += toTracksShelf("Continue session", "Recent songs from your listening history", h.recent);
+    content += h.recent.length ? `<div class="actions"><button class="btn pri" data-act="${reg(() => playList(h.recent, 0))}">${ic("play")}Resume listening</button></div>` : emptyState("Nothing to continue yet", "Play a few songs and Aura will keep your recent listening here.", `<button class="btn pri" data-act="${reg(() => nav("#/search"))}">${ic("search")}Find music</button>`);
+    main().innerHTML = `<h1 class="page">Continue session</h1>${tabBar}${content}`; watchMore(); return;
   }
-  html += shelf("Made from your library", "Mixes generated from what's on your drive", h.mixes.map(mixCard).join(""));
-  html += shelf("Recently added", "", h.added.map((_, i) => trackCard(h.added, i)).join(""), `<a class="link" href="#/library/songs">Show all</a>`);
-  html += shelf("Rediscover", "Songs you haven't played yet", h.unheard.map((_, i) => trackCard(h.unheard, i)).join(""));
-  html += `<div id="recs"></div>`;
-  main().innerHTML = html; watchMore();
-  // online recommendations load after the local shelves are already on screen
-  const box = $("#recs"); box.innerHTML = `<h2 class="sec">Recommended for you</h2><div class="note"><span class="spin"></span>Finding songs similar to what you play…</div>`;
-  try {
-    const r = await api("/api/recs"); if (tok !== S.viewTok) return;
-    if (!r.mixes.length) box.innerHTML = r.reason ? `<h2 class="sec">Recommended for you</h2><div class="note">${esc(r.reason)}</div>` : "";
-    else box.innerHTML = `<h2 class="sec">Recommended for you</h2><div class="sec-sub">Based on your listening and liked songs</div><div class="shelf">${r.mixes.map(mixCard).join("")}</div>`;
-  } catch (e) { if (tok === S.viewTok) box.innerHTML = ""; }
+  if (tab === "genres") {
+    const genres = ["Pop", "Hip-Hop", "Electronic", "R&B", "Rock", "Jazz", "Classical", "Ambient", "Dance", "Indie", "Acoustic", "Bangla", "K-Pop", "Metal", "Lo-fi"];
+    content += `<div class="genre-pills">${genres.map(g => `<a class="chip ${g.toLowerCase() === genre.toLowerCase() ? "on" : ""}" href="#/home?tab=genres&genre=${encodeURIComponent(g)}">${esc(g)}</a>`).join("")}</div><div id="discover-content"><div class="note"><span class="spin"></span>Finding ${esc(genre)} music across supported catalogs…</div></div>`;
+    main().innerHTML = `<h1 class="page">Explore by genre</h1>${tabBar}${content}`;
+    api("/api/discover?" + new URLSearchParams({ tab: "genres", genre, country: "BD" })).then(r => { if (tok !== S.viewTok) return; const el = $("#discover-content"); if (el) { el.innerHTML = renderGroups(r, `Genre exploration for ${genre}. Provider sections stay separate so native recommendations and playback sources are clear.`); hydrate(el); watchMore(); } }).catch(e => { const el = $("#discover-content"); if (el) el.innerHTML = `<div class="note err">${esc(e.message)}</div>`; });
+    return;
+  }
+  if (tab === "hot" || tab === "releases") {
+    const title = tab === "hot" ? "Hot topics" : "New releases";
+    content += `<div id="discover-content"><div class="note"><span class="spin"></span>Fetching current ${tab === "hot" ? "charts and trending tracks" : "release listings"} from provider APIs…</div></div>`;
+    main().innerHTML = `<h1 class="page">${title}</h1>${tabBar}${content}`;
+    api("/api/discover?" + new URLSearchParams({ tab, country: "BD" })).then(r => { if (tok !== S.viewTok) return; const el = $("#discover-content"); if (el) { el.innerHTML = renderGroups(r, tab === "hot" ? "Charts and trending data from providers that expose it. Popularity is source-specific, not a universal ranking." : "Release-date data where the provider supplies it. Some catalogs expose metadata rather than a complete playable stream."); hydrate(el); watchMore(); } }).catch(e => { const el = $("#discover-content"); if (el) el.innerHTML = `<div class="note err">${esc(e.message)}</div>`; });
+    return;
+  }
+  main().innerHTML = `<h1 class="page">Discover music</h1>${tabBar}${emptyState("Choose a discovery tab", "Explore recommendations, trending music, genres, recent releases, or continue listening.")}`;
 };
 
 VIEWS.mix = async (arg, qs, tok) => {
@@ -663,34 +899,73 @@ VIEWS.mix = async (arg, qs, tok) => {
 /* ---------- search: local first, then online ---------- */
 VIEWS.search = async (arg, qs, tok) => {
   const text = (qs.get("q") || "").trim();
+  const kind = qs.get("kind") || "songs", sort = qs.get("sort") || "best";
   if ($("#q").value !== text && document.activeElement !== $("#q")) $("#q").value = text;
-  if (!text) { main().innerHTML = emptyState("Search everything", "Type a song, artist or album. Aura looks in your library first and only goes online if it needs to.", "", "search"); return; }
-  main().innerHTML = `<h1 class="page">Results for “${esc(text)}”</h1>${skeleton(4)}`;
-  let local;
-  try { local = (await api("/api/search?" + new URLSearchParams({ q: text, scope: "local" }))).local; } catch (e) { local = []; }
+  if (!text) {
+    let queries = [];
+    try { queries = (await api("/api/search-history")).queries || []; } catch { }
+    if (tok !== S.viewTok) return;
+    main().innerHTML = `<h1 class="page">Search</h1><div class="sub">Search your library, YouTube Music, and free music catalog metadata. Use <code>tag:rock</code> or <code>genre:jazz</code> to search local genre tags.</div>
+      <div class="search-prefs"><label>Search type<select class="field" id="search-kind"><option value="songs">Songs</option><option value="all">All music catalogs</option><option value="playlists">Playlists</option><option value="channels">Artists / channels</option></select></label><label>Sort results<select class="field" id="search-sort"><option value="best">Best match</option><option value="recent">Most recent</option><option value="popular">Most popular (where available)</option></select></label></div>
+      <div class="history-head"><h2 class="sec">Search history</h2><button class="btn ghost" id="clear-search-history">Clear history</button></div>
+      <div class="history-list">${queries.length ? queries.map(item => `<button class="history-item" data-query="${esc(item.query)}">${ic("search")}<span>${esc(item.query)}</span><small>${new Date(item.ts * 1000).toLocaleDateString()}</small></button>`).join("") : `<div class="note">Your recent searches will appear here.</div>`}</div>`;
+    $("#search-kind").value = kind; $("#search-sort").value = sort;
+    return;
+  }
+  main().innerHTML = `<h1 class="page">Results for “${esc(text)}”</h1><div class="search-prefs"><label>Search type<select class="field" id="search-kind"><option value="songs">Songs</option><option value="all">All music catalogs</option><option value="playlists">Playlists</option><option value="channels">Artists / channels</option></select></label><label>Sort results<select class="field" id="search-sort"><option value="best">Best match</option><option value="recent">Most recent</option><option value="popular">Most popular (where available)</option></select></label></div>${skeleton(4)}`;
+  $("#search-kind").value = kind; $("#search-sort").value = sort;
+  if (kind === "playlists" || kind === "channels") {
+    loadCollections(text, tok, kind, sort); return;
+  }
+  let local = [];
+  try { local = (await api("/api/search?" + new URLSearchParams({ q: text, scope: "local" }))).local; } catch { }
   if (tok !== S.viewTok) return;
-  const auto = !local.length || local.length < 3 || S.settings.always_online;
-  let html = `<h1 class="page">Results for “${esc(text)}”</h1>`;
-  html += `<h2 class="sec" style="margin-top:14px">In your library</h2>`;
-  html += local.length ? trackTable(local) : `<div class="note">${ic("folder")}Nothing in your library matches${auto ? " — searching online" : ""}.</div>`;
-  html += `<div id="online">${auto ? "" : `<div class="actions"><button class="btn" data-act="${reg(() => loadOnline(text, local, tok))}">${ic("search")}Search online for “${esc(text)}”</button></div>`}</div>`;
-  main().innerHTML = html; watchMore();
-  if (auto) loadOnline(text, local, tok);
+  const isTag = /^(tag|genre):/i.test(text);
+  const auto = kind !== "songs" || !local.length || local.length < 3 || S.settings.always_online;
+  let html = `<h1 class="page">Results for “${esc(text)}”</h1><div class="search-prefs"><label>Search type<select class="field" id="search-kind"><option value="songs">Songs</option><option value="all">All music catalogs</option><option value="playlists">Playlists</option><option value="channels">Artists / channels</option></select></label><label>Sort results<select class="field" id="search-sort"><option value="best">Best match</option><option value="recent">Most recent</option><option value="popular">Most popular (where available)</option></select></label></div>`;
+  html += `<h2 class="sec" style="margin-top:14px">In your library${isTag ? " · genre tags" : ""}</h2>`;
+  html += local.length ? trackTable(local) : `<div class="note">${isTag ? "No local tracks matched that tag." : `Nothing in your library matches${auto ? " — searching online" : ""}.`}</div>`;
+  html += `<div id="online">${(auto && !isTag) ? "" : (isTag ? "" : `<div class="actions"><button class="btn" data-act="${reg(() => loadOnline(text, local, tok, kind, sort))}">${ic("search")}Search online for “${esc(text)}”</button></div>`)}</div>`;
+  main().innerHTML = html; $("#search-kind").value = kind; $("#search-sort").value = sort; watchMore();
+  if (auto && !isTag) loadOnline(text, local, tok, kind, sort);
 };
-async function loadOnline(text, local, tok) {
-  const box = $("#online"); if (!box) return;
-  box.innerHTML = `<h2 class="sec">From the web</h2><div class="note"><span class="spin"></span>Searching YouTube Music${S.caps.spotify ? " and Spotify" : ""}…</div>`;
+
+function orderResults(tracks, sort) {
+  const out = [...(tracks || [])];
+  if (sort === "recent") return out.sort((a, b) => String(b.release_date || b.year || "").localeCompare(String(a.release_date || a.year || "")));
+  if (sort === "popular") return out.sort((a, b) => (+b.popularity || +b.views || 0) - (+a.popularity || +a.views || 0));
+  return out; // provider relevance order
+}
+
+async function loadCollections(text, tok, kind, sort) {
+  main().innerHTML = `<h1 class="page">${kind === "playlists" ? "Playlist" : "Artist / channel"} results for “${esc(text)}”</h1><div class="note"><span class="spin"></span>Searching YouTube Music…</div>`;
   let r;
-  try { r = await api("/api/search?" + new URLSearchParams({ q: text, scope: "online" })); }
+  try { r = await api("/api/search?" + new URLSearchParams({ q: text, scope: "online", kind, sort })); }
+  catch (e) { if (tok === S.viewTok) main().innerHTML = `<div class="note err">Search failed: ${esc(e.message)}</div>`; return; }
+  if (tok !== S.viewTok) return;
+  const items = r.collections || [];
+  main().innerHTML = `<h1 class="page">${kind === "playlists" ? "Playlist" : "Artist / channel"} results for “${esc(text)}”</h1><div class="search-prefs"><label>Search type<select class="field" id="search-kind"><option value="songs">Songs</option><option value="all">All music catalogs</option><option value="playlists">Playlists</option><option value="channels">Artists / channels</option></select></label><label>Sort results<select class="field" id="search-sort"><option value="best">Best match</option><option value="recent">Most recent</option><option value="popular">Most popular (where available)</option></select></label></div>${items.length ? `<div class="grid collection-grid">${items.map(item => `<a class="card collection-card" href="${esc(item.url)}" target="_blank" rel="noreferrer">${cover(item.art)}<b>${esc(item.title)}</b><small>${esc(item.artist || "")}</small></a>`).join("")}</div>` : `<div class="note">No ${kind} found. Try a different phrase.</div>`}${(r.errors || []).map(e => `<div class="note err">${esc(e)}</div>`).join("")}`;
+  $("#search-kind").value = kind; $("#search-sort").value = sort;
+}
+
+async function loadOnline(text, local, tok, kind = "songs", sort = "best") {
+  const box = $("#online"); if (!box) return;
+  box.innerHTML = `<h2 class="sec">From the web</h2><div class="note"><span class="spin"></span>Searching YouTube Music and free catalogs${S.caps.spotify ? " plus Spotify" : ""}…</div>`;
+  let r;
+  try { r = await api("/api/search?" + new URLSearchParams({ q: text, scope: "online", kind, sort })); }
   catch (e) { if (tok === S.viewTok) box.innerHTML = `<h2 class="sec">From the web</h2><div class="note err">Couldn't reach online providers: ${esc(e.message)}</div>`; return; }
   if (tok !== S.viewTok) return;
   const have = new Set(local.map(t => normStr(t.title) + "|" + normStr(firstArtist(t.artist))));
   const dedupe = ts => ts.filter(t => !have.has(normStr(t.title) + "|" + normStr(firstArtist(t.artist))));
-  const yt = dedupe(r.yt), sp = dedupe(r.sp);
+  const yt = orderResults(dedupe(r.yt), sort), sp = orderResults(dedupe(r.sp), sort), itunes = orderResults(dedupe(r.itunes || []), sort), mb = orderResults(dedupe(r.musicbrainz || []), sort), audius = orderResults(dedupe(r.audius || []), sort), jamendo = orderResults(dedupe(r.jamendo || []), sort);
   let html = "";
   if (yt.length) html += `<h2 class="sec">From YouTube Music</h2><div class="sec-sub">Plays instantly, ad-free · use ⋯ to download</div>` + trackTable(yt);
   if (sp.length) html += `<h2 class="sec">From Spotify</h2><div class="sec-sub">Catalog match — audio is streamed from YouTube Music</div>` + trackTable(sp);
-  if (!yt.length && !sp.length) html += `<h2 class="sec">From the web</h2><div class="note">No online results${r.errors.length ? "" : " for this search"}.</div>`;
+  if (itunes.length) html += `<h2 class="sec">From iTunes catalog</h2><div class="sec-sub">Free catalog results; full playback is matched through YouTube Music</div>` + trackTable(itunes);
+  if (audius.length) html += `<h2 class="sec">From Audius</h2><div class="sec-sub">Open streaming catalog · direct audio streaming and creator-permitted downloads where flagged</div>` + trackTable(audius);
+  if (jamendo.length) html += `<h2 class="sec">From Jamendo</h2><div class="sec-sub">Licensed independent music · streams and downloads follow artist permissions${S.settings.jamendo_client_id ? "" : "; add a free Jamendo client ID in Settings to enable"}</div>` + trackTable(jamendo);
+  if (mb.length) html += `<h2 class="sec">From MusicBrainz</h2><div class="sec-sub">Open recording metadata; playback is resolved against a stream source</div>` + trackTable(mb);
+  if (!yt.length && !sp.length && !itunes.length && !mb.length && !audius.length && !jamendo.length) html += `<h2 class="sec">From the web</h2><div class="note">No online results${r.errors.length ? "" : " for this search"}.</div>`;
   r.errors.forEach(e => { html += `<div class="note err">${esc(e)}</div>`; });
   box.innerHTML = html; watchMore();
 }
@@ -767,8 +1042,30 @@ function paintDownloads() {
 }
 function openPath(p) { try { window.pywebview.api.open_path(p); } catch { toast("Open this folder manually: " + p); } }
 
+/* ---------- personalization ---------- */
+VIEWS.personalization = async (arg, qs, tok) => {
+  const s = S.settings;
+  main().innerHTML = `<h1 class="page">Personalization</h1><div class="sub">Tune Aura's layout, neon colors, recommendation blocks, and floating mini-player.</div>
+    <div class="set"><h3>Neon cyber appearance</h3><p>Pick an accent for active controls and the neon-orange logo.</p><div class="line"><div><b>Accent colour</b><small>Highlights throughout Aura</small></div><div class="swatches">${SWATCHES.map(a => `<button class="sw ${a === s.accent ? "on" : ""}" data-sw="${a}" style="background:${a}" aria-label="${a}"></button>`).join("")}</div></div></div>
+    <div class="set"><h3>Music blocks</h3><p>Customize recommendation cards and home shelves.</p>
+      <div class="line"><div><b>Card size</b><small>Controls the width of music blocks across shelves</small></div><div class="seg" data-seg="card_size">${[["compact","Compact"],["medium","Medium"],["large","Large"]].map(([v,l]) => `<button data-v="${v}" class="${(s.card_size || "medium") === v ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="line"><div><b>Rounded artwork</b><small>Use circular artwork tiles for a softer appearance</small></div>${sw("card_round", !!s.card_round)}</div>
+      <div class="line"><div><b>Shelf spacing</b><small>Space between music blocks</small></div><select class="field" data-set="shelf_gap">${[8,12,16,20,24].map(v => `<option value="${v}" ${+(s.shelf_gap || 16) === v ? "selected" : ""}>${v}px</option>`).join("")}</select></div>
+    </div>
+    <div class="set"><h3>Neon mini-player bar</h3><p>Use the mini icon for an in-app compact player, or the adjacent floating-window icon to hide Aura's main interface and keep a small always-on-top desktop bar. Drag its background to move it; releasing near a screen edge snaps it there. The native floating mode requires the desktop app, not --browser.</p>
+      <div class="line"><div><b>Mini-player color</b><small>Changes both the translucent bar tint and spectrum glow</small></div><input class="color-field" type="color" data-set="mini_color" value="${esc(s.mini_color || "#ff5b1f")}" aria-label="Mini-player color"></div>
+      <div class="line"><div><b>Background opacity</b><small>Lower values make the player more transparent</small></div><label class="range-setting"><input type="range" min="25" max="95" step="5" data-set="mini_opacity" value="${+(s.mini_opacity ?? 72)}"><output>${+(s.mini_opacity ?? 72)}%</output></label></div>
+      <div class="line"><div><b>Bar width</b><small>Percentage of the application width</small></div><label class="range-setting"><input type="range" min="45" max="96" step="1" data-set="mini_width" value="${+(s.mini_width ?? 76)}"><output>${+(s.mini_width ?? 76)}%</output></label></div>
+      <div class="line"><div><b>Bar height</b><small>Compact or more spacious controls in the full app</small></div><label class="range-setting"><input type="range" min="60" max="120" step="2" data-set="mini_height" value="${+(s.mini_height ?? 78)}"><output>${+(s.mini_height ?? 78)} px</output></label></div>
+      <div class="line"><div><b>Floating width</b><small>Width of the separate always-on-top desktop bar</small></div><label class="range-setting"><input type="range" min="320" max="900" step="20" data-set="floating_width" value="${+(s.floating_width ?? 520)}"><output>${+(s.floating_width ?? 520)} px</output></label></div>
+      <div class="line"><div><b>Floating height</b><small>Make the desktop bar shorter or taller</small></div><label class="range-setting"><input type="range" min="64" max="140" step="4" data-set="floating_height" value="${+(s.floating_height ?? 88)}"><output>${+(s.floating_height ?? 88)} px</output></label></div>
+      <div class="actions"><button class="btn" data-act="${reg(() => toggleMiniPlayer())}">${ic("mini")}Toggle in-app mini-player</button><button class="btn pri" data-act="${reg(() => toggleFloatingDesktop())}">${ic("expand")}Float on desktop</button></div>
+    </div>
+    <div class="set"><h3>Search & discovery</h3><p>Choose how results are interpreted. Use <code>tag:rock</code> or <code>genre:jazz</code> for tags in your own library.</p><div class="note">Aura separates native streams (Audius, Jamendo, YouTube Music) from catalog-only results (Spotify, Apple/iTunes, MusicBrainz). Sorting uses the metadata that each provider actually supplies.</div></div>`;
+};
+
 /* ---------- settings ---------- */
-const SWATCHES = ["#ffb547", "#ff7a9c", "#5ee0c8", "#8f9bff", "#c4e86b", "#ff7a45"];
+const SWATCHES = ["#ff681f", "#ff7a45", "#ffb547", "#ff4fa3", "#5ee0c8", "#8f9bff"];
 const seg = (k, opts, cur) => `<div class="seg" data-seg="${k}">${opts.map(([v, l]) => `<button data-v="${v}" class="${String(cur) === String(v) ? "on" : ""}">${l}</button>`).join("")}</div>`;
 const sw = (k, on) => `<label class="switch"><input type="checkbox" data-set="${k}" ${on ? "checked" : ""}><span></span></label>`;
 VIEWS.settings = async (arg, qs, tok) => {
@@ -779,6 +1076,7 @@ VIEWS.settings = async (arg, qs, tok) => {
     ${folders.map(f => `<div class="folder">${ic("folder")}<span>${esc(f)}</span><button class="btn ghost" data-act="${reg(async () => { await api("/api/folders/remove", { path: f }); await loadLibrary(); render(); })}">Remove</button></div>`).join("") || `<div class="folder" style="color:var(--dim)">No folders yet</div>`}
     <div class="actions"><button class="btn pri" data-act="${reg(addFolderFlow)}">${ic("plus")}Add folder</button><button class="btn" data-act="${reg(async () => { await api("/api/library/scan", {}); pollScan(); })}">${ic("refresh")}Rescan</button></div></div>
   <div class="set"><h3>Playback</h3><p>Streams are fetched as direct audio, so there are no ads.</p>
+    <div class="line"><div><b>Skip forward / backward</b><small>Changes the seek buttons and left/right keyboard shortcuts</small></div><select class="field" data-set="skip_seconds">${[5,10,15,20,30,45,60].map(v => `<option value="${v}" ${+(s.skip_seconds || 10) === v ? "selected" : ""}>${v} seconds</option>`).join("")}</select></div>
     <div class="line"><div><b>Streaming quality</b><small>Max picks the best audio stream available</small></div>${seg("stream_quality", [["low", "Low"], ["normal", "Normal"], ["high", "High"], ["max", "Max"]], s.stream_quality)}</div>
     <div class="line"><div><b>Prefer AAC (m4a) streams</b><small>Better compatibility on macOS; Opus is usually higher quality elsewhere</small></div>${sw("prefer_aac", s.prefer_aac)}</div>
     <div class="line"><div><b>Always search online too</b><small>Otherwise Aura only goes online when your library has fewer than 3 matches</small></div>${sw("always_online", s.always_online)}</div>
@@ -792,21 +1090,40 @@ VIEWS.settings = async (arg, qs, tok) => {
   <div class="set"><h3>Downloads</h3><p>Downloaded songs are saved in your library with tags and artwork${c.ffmpeg ? "" : " (install ffmpeg for MP3 conversion and embedded artwork)"}.</p>
     <div class="line"><div><b>Default format</b></div>${seg("download_format", [["original", "Original"], ["mp3_320", "MP3 320"], ["mp3_192", "MP3 192"]], s.download_format)}</div>
     <div class="line"><div><b>Save to</b></div><input class="field" data-set="download_dir" value="${esc(s.download_dir)}" style="min-width:320px"><button class="btn ghost" data-act="${reg(async () => { try { const p = await window.pywebview.api.pick_folder(); if (p) { S.settings = await api("/api/settings", { download_dir: p }); render(); } } catch { toast("Type the path into the box instead"); } })}">Browse</button></div></div>
-  <div class="set"><h3>Spotify (optional)</h3><p>Add a free Spotify developer app's credentials to include Spotify's catalog in search. Audio is always matched and streamed from YouTube Music, because Spotify's own streams are DRM-protected.</p>
+  <div class="set"><h3>Open music catalogs</h3><p>Audius search, charts, and streaming are available without an API key for normal read-only use. An optional Audius token can increase rate limits. Jamendo is an additional licensed catalog and needs a free client ID.</p>
+    <div class="line"><div><b>Audius API token (optional)</b><small>Leave blank for public read-only use</small></div><input class="field" type="password" data-set="audius_api_token" value="${esc(s.audius_api_token || "")}" autocomplete="off"></div>
+    <div class="line"><div><b>Jamendo client ID</b><small>Get a free app ID from the Jamendo developer portal</small></div><input class="field" data-set="jamendo_client_id" value="${esc(s.jamendo_client_id || "")}" autocomplete="off"><a class="link" href="https://devportal.jamendo.com/" target="_blank" rel="noreferrer">Get ID</a></div></div>
+  <div class="set"><h3>Spotify (optional)</h3><p>Spotify provides catalog metadata and discovery, not unrestricted full-track audio. Aura resolves playback separately through a playable source.</p>
     <div class="line"><div><b>Client ID</b></div><input class="field" data-set="spotify_id" value="${esc(s.spotify_id)}" autocomplete="off"></div>
     <div class="line"><div><b>Client secret</b></div><input class="field" type="password" data-set="spotify_secret" value="${esc(s.spotify_secret)}" autocomplete="off"></div></div>
-  <div class="set"><h3>Appearance</h3><div class="line"><div><b>Accent colour</b></div><div class="swatches">${SWATCHES.map(a => `<button class="sw ${a === s.accent ? "on" : ""}" data-sw="${a}" style="background:${a}" aria-label="${a}"></button>`).join("")}</div></div></div>
-  <div class="set"><h3>Status</h3><div class="dots">${st(c.yt_dlp, "yt-dlp (streaming and downloads)")}${st(c.ytmusicapi, "ytmusicapi (online search)")}${st(c.mutagen, "mutagen (tags and artwork)")}${st(c.ffmpeg, "ffmpeg (MP3 conversion, optional)")}</div></div>`;
+  <div class="set"><h3>Appearance</h3><p>Detailed block customization is available in the Personalization tab.</p><div class="line"><div><b>Accent colour</b></div><div class="swatches">${SWATCHES.map(a => `<button class="sw ${a === s.accent ? "on" : ""}" data-sw="${a}" style="background:${a}" aria-label="${a}"></button>`).join("")}</div></div></div>
+  <div class="set"><h3>Status</h3><div class="dots">${st(c.yt_dlp, "yt-dlp (YouTube playback resolution)")}${st(c.ytmusicapi, "ytmusicapi (YouTube Music search and charts)")}${st(c.audius, "Audius (free search and streaming API)")}${st(c.jamendo, "Jamendo (configured licensed catalog)")}${st(c.mutagen, "mutagen (tags and artwork)")}${st(c.ffmpeg, "ffmpeg (MP3 conversion, optional)")}</div></div>`;
 };
+document.addEventListener("input", e => {
+  const k = e.target.dataset?.set;
+  if (["mini_color", "mini_opacity", "mini_width", "mini_height", "floating_width", "floating_height"].includes(k)) {
+    const v = e.target.type === "color" ? e.target.value : +e.target.value;
+    const temp = { ...S.settings, [k]: v };
+    const before = S.settings; S.settings = temp; applyMiniPrefs();
+    if (e.target.type === "range") { const out = e.target.parentElement.querySelector("output"); if (out) out.textContent = ["mini_height", "floating_width", "floating_height"].includes(k) ? `${v} px` : `${v}%`; }
+    S.settings = before;
+  }
+});
 document.addEventListener("change", async e => {
+  if (e.target.id === "search-kind" || e.target.id === "search-sort") { doSearch(); return; }
   const k = e.target.dataset?.set; if (!k) return;
   let v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
-  if (k === "output_rate") v = +v;
-  try { S.settings = await api("/api/settings", { [k]: v }); S.caps = await api("/api/caps"); toast("Saved"); } catch (er) { toast(er.message, true); }
+  if (["output_rate", "skip_seconds", "shelf_gap", "mini_opacity", "mini_width", "mini_height", "floating_width", "floating_height"].includes(k)) v = +v;
+  try { S.settings = await api("/api/settings", { [k]: v }); S.caps = await api("/api/caps"); applyPersonalization(); applyMiniPrefs(); syncSkipLabels();
+    if (e.target.type === "range") { const out = e.target.parentElement.querySelector("output"); if (out) out.textContent = ["mini_height", "floating_width", "floating_height"].includes(k) ? `${v} px` : `${v}%`; }
+    if (["floating_width", "floating_height"].includes(k) && document.body.classList.contains("floating-desktop-mode") && window.pywebview?.api?.resize_floating_window) {
+      await window.pywebview.api.resize_floating_window({ width: +(S.settings.floating_width || 520), height: +(S.settings.floating_height || 88) });
+    }
+    toast("Saved"); } catch (er) { toast(er.message, true); }
 });
 document.addEventListener("click", async e => {
   const sg = e.target.closest("[data-seg] button");
-  if (sg) { const k = sg.parentElement.dataset.seg; S.settings = await api("/api/settings", { [k]: sg.dataset.v }); $$("button", sg.parentElement).forEach(b => b.classList.toggle("on", b === sg)); toast("Saved"); return; }
+  if (sg) { const k = sg.parentElement.dataset.seg; S.settings = await api("/api/settings", { [k]: sg.dataset.v }); applyPersonalization(); $$("button", sg.parentElement).forEach(b => b.classList.toggle("on", b === sg)); toast("Saved"); return; }
   const w = e.target.closest("[data-sw]");
   if (w) { S.settings = await api("/api/settings", { accent: w.dataset.sw }); applyAccent(w.dataset.sw); $$(".sw").forEach(b => b.classList.toggle("on", b === w)); }
 });
@@ -814,6 +1131,24 @@ function applyAccent(c) {
   const r = document.documentElement.style; r.setProperty("--accent", c);
   const [R, G, B] = [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
   r.setProperty("--accent-ink", (.299 * R + .587 * G + .114 * B) / 255 > .55 ? "#1d1300" : "#ffffff");
+}
+function applyPersonalization() {
+  const root = document.documentElement;
+  root.dataset.cardSize = S.settings.card_size || "medium";
+  root.dataset.cardRound = S.settings.card_round ? "round" : "square";
+  root.style.setProperty("--shelf-gap", `${clamp(+S.settings.shelf_gap || 16, 4, 32)}px`);
+  applyMiniPrefs();
+}
+function applyMiniPrefs() {
+  const root = document.documentElement;
+  const c = /^#[0-9a-f]{6}$/i.test(S.settings.mini_color || "") ? S.settings.mini_color : "#ff5b1f";
+  const rgb = [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
+  const opacity = clamp(+(S.settings.mini_opacity ?? 72), 25, 95) / 100;
+  root.style.setProperty("--mini-color", c);
+  root.style.setProperty("--mini-bg", `rgba(${rgb.join(",")},${opacity})`);
+  root.style.setProperty("--mini-width", `${clamp(+(S.settings.mini_width ?? 76), 45, 96)}vw`);
+  root.style.setProperty("--mini-height", `${clamp(+(S.settings.mini_height ?? 78), 60, 120)}px`);
+  const colorField = $("input[data-set='mini_color']"); if (colorField && colorField.value !== c) colorField.value = c;
 }
 
 /* ============================================================ router + global events */
@@ -836,8 +1171,17 @@ $("#back").onclick = () => history.back(); $("#fwd").onclick = () => history.for
 $("#newpl").onclick = newPlaylist;
 
 // search box
+let searchHistoryTimer = null;
 const doSearch = () => {
-  const text = $("#q").value.trim(), h = "#/search" + (text ? "?q=" + encodeURIComponent(text) : "");
+  const text = $("#q").value.trim();
+  clearTimeout(searchHistoryTimer);
+  if (text) searchHistoryTimer = setTimeout(() => {
+    if ($("#q").value.trim() === text) api("/api/search-history", { query: text }).catch(() => {});
+  }, 900);
+  const kind = $("#search-kind")?.value || new URLSearchParams(location.hash.split("?")[1] || "").get("kind") || "songs";
+  const sort = $("#search-sort")?.value || new URLSearchParams(location.hash.split("?")[1] || "").get("sort") || "best";
+  const params = new URLSearchParams(); if (text) params.set("q", text); if (kind !== "songs") params.set("kind", kind); if (sort !== "best") params.set("sort", sort);
+  const h = "#/search" + (params.toString() ? "?" + params.toString() : "");
   if (location.hash.startsWith("#/search")) { history.replaceState(null, "", h); render(); } else nav(h);
 };
 $("#q").addEventListener("input", debounce(doSearch, 320));
@@ -849,6 +1193,9 @@ const rowInfo = row => ({ L: +row.dataset.l, i: +row.dataset.i });
 const rowTrack = row => { const { L, i } = rowInfo(row); return REG.lists[L].tracks[i]; };
 const playRow = row => { const { L, i } = rowInfo(row); playList(REG.lists[L].tracks, i); };
 document.addEventListener("click", e => {
+  const histItem = e.target.closest("[data-query]");
+  if (histItem) { $("#q").value = histItem.dataset.query; doSearch(); return; }
+  if (e.target.closest("#clear-search-history")) { api("/api/search-history/clear", {}).then(() => render()).catch(er => toast(er.message, true)); return; }
   const a = e.target.closest("[data-act]");
   if (a && REG.acts[+a.dataset.act]) { REG.acts[+a.dataset.act](e); return; }
   const row = e.target.closest(".row"); if (!row) return;
@@ -869,8 +1216,8 @@ document.addEventListener("keydown", e => {
   if (typing) return;
   if (e.key === " ") { e.preventDefault(); toggle(); }
   else if (e.key === "/") { e.preventDefault(); $("#q").focus(); }
-  else if (e.key === "ArrowRight") e.shiftKey ? next() : (audio.currentTime += 5);
-  else if (e.key === "ArrowLeft") e.shiftKey ? prev() : (audio.currentTime -= 5);
+  else if (e.key === "ArrowRight") e.shiftKey ? next() : skipBy(clamp(+S.settings.skip_seconds || 10, 1, 120));
+  else if (e.key === "ArrowLeft") e.shiftKey ? prev() : skipBy(-clamp(+S.settings.skip_seconds || 10, 1, 120));
   else if (e.key === "ArrowUp") { e.preventDefault(); setVolume(audio.volume + .05); }
   else if (e.key === "ArrowDown") { e.preventDefault(); setVolume(audio.volume - .05); }
   else if (e.key.toLowerCase() === "e") $("#b-eq").click();
@@ -903,10 +1250,11 @@ async function pollScan() {
   hydrate(); setPlaying(false);
   try {
     [S.settings, S.caps] = await Promise.all([api("/api/settings"), api("/api/caps")]);
-    applyAccent(S.settings.accent || "#ffb547");
+    applyAccent(S.settings.accent || "#ff681f"); applyPersonalization();
     S.eq = Object.assign(eqDefault(), S.settings.eq || {});
     S.eq.bands = (S.eq.bands || []).concat(Array(10).fill(0)).slice(0, 10);
-    bindEQ(); setVolume(S.settings.volume ?? .85); syncModes();
+    bindEQ(); setVolume(S.settings.volume ?? .85); syncModes(); syncSkipLabels();
+    if (S.settings.mini_player_mode) toggleMiniPlayer(true, false);
     await Promise.all([loadLibrary(), loadLikes(), loadPlaylists()]);
   } catch (e) { toast("Couldn't reach the Aura backend: " + e.message, true); }
   pollDownloads(); render();

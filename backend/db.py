@@ -24,6 +24,8 @@ CREATE INDEX IF NOT EXISTS ix_pi ON playlist_items(playlist_id, pos);
 CREATE TABLE IF NOT EXISTS likes(key TEXT PRIMARY KEY, track TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, track TEXT, ts REAL);
 CREATE INDEX IF NOT EXISTS ix_hist ON history(ts);
+CREATE TABLE IF NOT EXISTS search_history(query_key TEXT PRIMARY KEY, query TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_search_history_ts ON search_history(ts);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -68,9 +70,22 @@ DEFAULTS = {
     "always_online": False,
     "download_format": "original",     # original | mp3_320 | mp3_192
     "download_dir": str(Path.home() / "Music" / "Aura"),
-    "accent": "#ffb547",
+    "accent": "#ff681f",
+    "skip_seconds": 10,
+    "mini_color": "#ff5b1f",
+    "mini_opacity": 72,
+    "mini_width": 76,
+    "mini_height": 78,
+    "mini_player_mode": False,
+    "floating_width": 520,
+    "floating_height": 88,
+    "card_size": "medium",
+    "card_round": False,
+    "shelf_gap": 16,
     "spotify_id": "",
     "spotify_secret": "",
+    "jamendo_client_id": "",
+    "audius_api_token": "",
     "cookies_browser": "",             # chrome | edge | firefox | brave | ""
     "cookies_file": "",
     "output_rate": 0,                  # 0 = device default

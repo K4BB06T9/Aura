@@ -16,6 +16,7 @@
       <a href="#/library/songs" data-nav="library"><i data-ic="library"></i>Your library</a>
       <a href="#/likes" data-nav="likes"><i data-ic="heart"></i>Liked songs</a>
       <a href="#/downloads" data-nav="downloads"><i data-ic="download"></i>Downloads<em id="dlbadge" hidden></em></a>
+      <a href="#/personalization" data-nav="personalization"><i data-ic="sliders"></i>Personalization</a>
     </nav>
     <div class="side-head"><span>Playlists</span><button id="newpl" title="New playlist"><i data-ic="plus"></i></button></div>
     <div id="pls"></div>
@@ -37,18 +38,25 @@
       <div class="p-meta"><div id="p-title" class="t">Nothing playing</div><div id="p-artist" class="a">Pick something to start</div></div>
       <button id="p-like" class="ic" title="Like"><i data-ic="heart"></i></button>
     </div>
+    <canvas id="mini-viz" width="640" height="100" aria-hidden="true"></canvas>
     <div class="p-mid">
       <div class="p-ctl">
         <button id="b-shuf" class="ic" title="Shuffle"><i data-ic="shuffle"></i></button>
-        <button id="b-prev" class="ic" title="Previous"><i data-ic="prev"></i></button>
+        <button id="b-skipback" class="skip-btn" title="Skip back 10 seconds">−10s</button>
+        <button id="b-prev" class="ic" title="Previous track"><i data-ic="prev"></i></button>
         <button id="b-play" class="play" title="Play / pause"><i data-ic="play"></i></button>
-        <button id="b-next" class="ic" title="Next"><i data-ic="next"></i></button>
+        <button id="b-next" class="ic" title="Next track"><i data-ic="next"></i></button>
+        <button id="b-skipfwd" class="skip-btn" title="Skip forward 10 seconds">+10s</button>
         <button id="b-rep" class="ic" title="Repeat"><i data-ic="repeat"></i></button>
       </div>
       <div class="p-seek"><span id="t-cur">0:00</span><input id="seek" type="range" min="0" max="1000" value="0"><span id="t-dur">0:00</span></div>
     </div>
     <div class="p-right">
       <span id="p-qual" class="badge" hidden></span>
+      <span id="mini-prev-name" class="mini-track-name" title="Previous track"></span>
+      <span id="mini-next-name" class="mini-track-name" title="Next track"></span>
+      <button id="b-mini" class="ic" title="Toggle embedded mini-player"><i data-ic="mini"></i></button>
+      <button id="b-float" class="ic" title="Float player on desktop"><i data-ic="mini"></i></button>
       <button id="b-np" class="ic" title="Now playing"><i data-ic="expand"></i></button>
       <button id="b-eq" class="ic" title="Equalizer ( E )"><i data-ic="sliders"></i></button>
       <button id="b-q" class="ic" title="Queue ( Q )"><i data-ic="queue"></i></button>

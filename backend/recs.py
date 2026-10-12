@@ -55,13 +55,34 @@ def _seeds(n=3):
 
 
 def _mix_for(artist, track):
-    hit = _mix_cache.get(artist)
+    # Keep recommendations native to the service that supplied the seed track whenever possible.
+    source = track.get("source", "yt")
+    cache_key = source + ":" + artist.casefold()
+    hit = _mix_cache.get(cache_key)
     if hit and hit[0] > time.time():
         return hit[1]
-    vid = providers.video_id_for(track)
-    tracks = providers.radio(vid, 30)
-    mix = {"title": f"Because you play {artist}", "subtitle": "Fresh picks from YouTube Music", "tracks": tracks}
-    _mix_cache[artist] = (time.time() + MIX_TTL, mix)
+    if source == "audius":
+        tracks = providers.audius_related(track, 30)
+        subtitle = "Related tracks from Audius"
+    elif source == "jamendo":
+        query = (track.get("genre") or artist or track.get("title") or "indie").split(",")[0].strip()
+        tracks = providers.search_jamendo(query, 30)
+        subtitle = "More licensed independent music from Jamendo"
+    elif source == "sp":
+        # Spotify's Web API is catalog metadata, not a full-track audio API. Keep recommendation
+        # discovery on Spotify where credentials are configured; Aura resolves playback separately.
+        tracks = providers.search_sp(("artist:" + artist) if artist else track.get("title", ""), 30)
+        subtitle = "Spotify catalog picks related to your listening"
+    elif source == "itunes":
+        tracks = providers.search_itunes(artist or track.get("title", ""), 30)
+        subtitle = "Apple catalog picks around artists you play"
+    else:
+        vid = providers.video_id_for(track)
+        tracks = providers.radio(vid, 30)
+        subtitle = "Related tracks from YouTube Music"
+    tracks = [t for t in tracks if t.get("key") != track.get("key")]
+    mix = {"title": f"Because you play {artist}", "subtitle": subtitle, "tracks": tracks}
+    _mix_cache[cache_key] = (time.time() + MIX_TTL, mix)
     return mix
 
 
@@ -94,3 +115,14 @@ def mixes():
                     "tracks": merged[:40]})
     out.extend(res)
     return {"mixes": out, "errors": errors}
+
+
+def personalized():
+    result = mixes()
+    combined, seen = [], set()
+    for mix in result.get("mixes", []):
+        for track in mix.get("tracks", []):
+            if track.get("key") not in seen:
+                seen.add(track.get("key")); combined.append(track)
+    return {"tracks": combined[:40], "mixes": result.get("mixes", []), "reason": result.get("reason"),
+            "errors": result.get("errors", []), "providers": sorted({t.get("source", "") for t in combined})}
