@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aura</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div class="brand"><span class="logo"><i data-ic="logo"></i></span><b>Aura</b></div>
+    <nav id="nav">
+      <a href="#/home" data-nav="home"><i data-ic="home"></i>Home</a>
+      <a href="#/search" data-nav="search"><i data-ic="search"></i>Search</a>
+      <a href="#/library/songs" data-nav="library"><i data-ic="library"></i>Your library</a>
+      <a href="#/likes" data-nav="likes"><i data-ic="heart"></i>Liked songs</a>
+      <a href="#/downloads" data-nav="downloads"><i data-ic="download"></i>Downloads<em id="dlbadge" hidden></em></a>
+    </nav>
+    <div class="side-head"><span>Playlists</span><button id="newpl" title="New playlist"><i data-ic="plus"></i></button></div>
+    <div id="pls"></div>
+    <a class="side-foot" href="#/settings" data-nav="settings"><i data-ic="cog"></i>Settings</a>
+  </aside>
+
+  <section id="stage">
+    <header id="top">
+      <div class="hist"><button id="back" title="Back"><i data-ic="left"></i></button><button id="fwd" title="Forward"><i data-ic="right"></i></button></div>
+      <label id="sbox"><i data-ic="search"></i><input id="q" type="search" placeholder="Search songs, artists, albums  ( / )" autocomplete="off" spellcheck="false"></label>
+      <div id="scan-pill" hidden></div>
+    </header>
+    <main id="main"></main>
+  </section>
+
+  <footer id="player">
+    <div class="p-left">
+      <div class="p-art" id="p-art"><i data-ic="music"></i></div>
+      <div class="p-meta"><div id="p-title" class="t">Nothing playing</div><div id="p-artist" class="a">Pick something to start</div></div>
+      <button id="p-like" class="ic" title="Like"><i data-ic="heart"></i></button>
+    </div>
+    <div class="p-mid">
+      <div class="p-ctl">
+        <button id="b-shuf" class="ic" title="Shuffle"><i data-ic="shuffle"></i></button>
+        <button id="b-prev" class="ic" title="Previous"><i data-ic="prev"></i></button>
+        <button id="b-play" class="play" title="Play / pause"><i data-ic="play"></i></button>
+        <button id="b-next" class="ic" title="Next"><i data-ic="next"></i></button>
+        <button id="b-rep" class="ic" title="Repeat"><i data-ic="repeat"></i></button>
+      </div>
+      <div class="p-seek"><span id="t-cur">0:00</span><input id="seek" type="range" min="0" max="1000" value="0"><span id="t-dur">0:00</span></div>
+    </div>
+    <div class="p-right">
+      <span id="p-qual" class="badge" hidden></span>
+      <button id="b-np" class="ic" title="Now playing"><i data-ic="expand"></i></button>
+      <button id="b-eq" class="ic" title="Equalizer ( E )"><i data-ic="sliders"></i></button>
+      <button id="b-q" class="ic" title="Queue ( Q )"><i data-ic="queue"></i></button>
+      <button id="b-vol" class="ic" title="Mute"><i data-ic="volume"></i></button>
+      <input id="vol" type="range" min="0" max="100" value="85">
+    </div>
+  </footer>
+
+  <aside id="qd" aria-hidden="true">
+    <div class="qd-head"><b>Queue</b><button id="qd-clear" class="link">Clear</button><button id="qd-x" class="ic"><i data-ic="x"></i></button></div>
+    <div id="qd-body"></div>
+  </aside>
+</div>
+
+<div id="np" aria-hidden="true">
+  <div class="np-bg" id="np-bg"></div>
+  <button class="np-x ic" id="np-x"><i data-ic="x"></i></button>
+  <div class="np-body">
+    <div class="np-art" id="np-art"></div>
+    <div class="np-info"><h2 id="np-title"></h2><p id="np-artist"></p><span id="np-qual" class="badge"></span></div>
+    <canvas id="viz" width="900" height="160"></canvas>
+  </div>
+</div>
+
+<div id="eq" aria-hidden="true">
+  <div class="eq-card">
+    <div class="eq-head">
+      <div><b>Equalizer</b><small id="eq-sub">Shape the sound of everything you play</small></div>
+      <div class="eq-head-r">
+        <div class="seg" id="eq-mode"><button data-m="basic">Basic</button><button data-m="advanced">Advanced</button></div>
+        <label class="switch"><input type="checkbox" id="eq-on"><span></span></label>
+        <button class="ic" id="eq-x"><i data-ic="x"></i></button>
+      </div>
+    </div>
+    <div class="eq-presets" id="eq-presets"></div>
+    <div id="eq-basic" class="eq-pane"></div>
+    <div id="eq-adv" class="eq-pane"></div>
+    <div class="eq-fx" id="eq-fx"></div>
+    <div class="eq-foot"><button class="btn ghost" id="eq-save">Save as preset</button><button class="btn ghost" id="eq-reset">Reset</button></div>
+  </div>
+</div>
+
+<div id="menu" hidden></div>
+<div id="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>

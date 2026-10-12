@@ -1,0 +1,4 @@
+pywebview>=5.0
+yt-dlp
+ytmusicapi>=1.8
+mutagen>=1.47
